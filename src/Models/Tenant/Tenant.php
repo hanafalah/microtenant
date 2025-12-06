@@ -8,7 +8,6 @@ use Illuminate\Support\Str;
 use Stancl\Tenancy\Contracts\Tenant as ContractsTenant;
 use Stancl\Tenancy\Contracts\TenantWithDatabase;
 use Stancl\Tenancy\Database\Concerns\{
-    CentralConnection,
     HasDatabase,
     HasInternalKeys,
     InvalidatesResolverCache,
@@ -20,24 +19,26 @@ use Hanafalah\LaravelHasProps\Concerns\HasProps;
 use Stancl\Tenancy\Events;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Hanafalah\LaravelSupport\Models\BaseModel;
+use Hanafalah\MicroTenant\Concerns\Models\CentralConnection;
+use Hanafalah\MicroTenant\Resources\Tenant\ShowTenant;
+use Hanafalah\MicroTenant\Resources\Tenant\ViewTenant;
 
 class Tenant extends BaseModel implements ContractsTenant, TenantWithDatabase{
     use SoftDeletes, HasProps;
     use CentralConnection,
         HasDatabase,
-        // HasDataColumn,
         HasInternalKeys,
         TenantRun,
         InvalidatesResolverCache;
 
-
-    const FLAG_APP_TENANT     = '0';
-    const FLAG_CENTRAL_TENANT = '1';
-    const FLAG_TENANT         = '2';
+    const FLAG_APP_TENANT     = 'APP';
+    const FLAG_CENTRAL_TENANT = 'CENTRAL_TENANT';
+    const FLAG_TENANT         = 'TENANT';
+    const FLAG_CLUSTER        = 'CLUSTER';
 
     protected $fillable   = [
         'id','parent_id','name','uuid','reference_id','reference_type',
-        'flag','domain_id'
+        'flag','domain_id','props'
     ];
 
     protected static $modelsShouldPreventAccessingMissingAttributes = false;
@@ -45,8 +46,10 @@ class Tenant extends BaseModel implements ContractsTenant, TenantWithDatabase{
     protected static function booted(): void{
         parent::booted();
         static::creating(function($query){
-            if (!isset($query->uuid)) $query->uuid = Str::orderedUuid();
-            if (!isset($query->flag)) $query->flag = static::FLAG_TENANT;
+            $query->uuid ??= Str::orderedUuid();
+            $query->flag ??= static::FLAG_TENANT;
+            $connection = config('database.default');
+            $query->db_name ??= config('database.connections.'.$connection.'.database');
         });
     }
 
@@ -55,16 +58,25 @@ class Tenant extends BaseModel implements ContractsTenant, TenantWithDatabase{
     }
 
     public function getConnectionFlagName(): string{
-        return match($this->flag){
-            static::FLAG_APP_TENANT     => 'central_app',
-            static::FLAG_CENTRAL_TENANT => 'central_tenant',
-            static::FLAG_TENANT         => 'tenant'
-        };
+        switch ($this->flag) {
+            case static::FLAG_APP_TENANT: return 'central_app';break;
+            case static::FLAG_CENTRAL_TENANT: return 'central_tenant';break;
+            case static::FLAG_TENANT: return 'tenant';break;
+            default: return 'tenant';break;
+        }
     }
 
     public function getTenantKey()
     {
         return $this->getAttribute($this->getTenantKeyName());
+    }
+
+    public function getShowResource(){
+        return ShowTenant::class;
+    }
+
+    public function getViewResource(){
+        return ViewTenant::class;
     }
 
     //SCOPE SECTION
@@ -75,12 +87,14 @@ class Tenant extends BaseModel implements ContractsTenant, TenantWithDatabase{
 
     //EIGER SECTION
     public function domain(){return $this->belongsToModel('Domain');}
+    public function domains(){return $this->hasManyModel('Domain');}
     public function tenantHasModel(){return $this->hasOneModel('TenantHasModel');}
     public function tenantHasModels(){return $this->hasManyModel('TenantHasModel');}
     public function installationSchema(){return $this->morphOneModel('InstallationSchema','reference');} //ONLY ONE
     public function modelHasFeatures(){return $this->hasManyModel('ModelHasFeature');}
     public function modelHasApp(){return $this->morphOneModel('ModelHasApp','model');}
-    public function reference(){return $this->morphTo('reference');}
+    public function reference(){return $this->morphTo();}
+    public function parent(){return $this->belongsToModel('Tenant','parent_id')->with('parent');}
     //END EIGER SECTION
 
     public function newCollection(array $models = []): TenantCollection

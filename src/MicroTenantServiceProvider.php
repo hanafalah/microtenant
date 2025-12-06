@@ -1,34 +1,22 @@
 <?php
 
-declare(strict_types=1);
-
 namespace Hanafalah\MicroTenant;
 
-use Illuminate\Database\Schema\Blueprint;
-use Illuminate\Foundation\Http\Kernel;
-use Illuminate\Support\Facades\Route;
-use Laravel\Sanctum\Sanctum;
-use Hanafalah\MicroTenant\MicroTenant;
-use Hanafalah\ApiHelper\Facades\ApiAccess as FacadesApiAccess;
-use Hanafalah\LaravelSupport\Middlewares\Middleware;
 use Hanafalah\MicroTenant\Facades\MicroTenant as FacadesMicroTenant;
+use Hanafalah\MicroTenant\MicroTenant;
 
 class MicroTenantServiceProvider extends MicroServiceProvider
 {
     public function register()
     {
-        $this->__is_multitenancy = true;
         $this->registerMainClass(MicroTenant::class)
             ->registerCommandService(Providers\CommandServiceProvider::class)
-            ->registerEnvironment()
             ->registerConfig(function () {
                 $this->mergeConfigWith('tenancy', 'tenancy')
-                    ->setLocalConfig('micro-tenant');
-            })
-            ->registers([
+                     ->setLocalConfig('micro-tenant');
+            })->registers([
                 '*',
                 'Provider' => function () {
-                    $this->registerTenant();
                     $this->validProviders([
                         \app_path('Providers/MicroTenantServiceProvider.php') => 'App\Providers\MicroTenantServiceProvider',
                     ]);
@@ -39,50 +27,75 @@ class MicroTenantServiceProvider extends MicroServiceProvider
                     ], 'seeders');
 
                     $this->publishes([
-                        $this->getAssetPath('stubs/provider-app.stub') => app_path('Providers/MicroTenantServiceProvider.php'),
+                        $this->getAssetPath('stubs/MicroTenantServiceProvider.php.stub') => app_path('Providers/MicroTenantServiceProvider.php'),
                     ], 'providers');
-                },
-                'Services' => function () {
-                    $this->binds([
-                        Contracts\MicroTenant::class             => new MicroTenant(),
-                        Contracts\Models\Tenant::class           => function ($app) {
-                            return $app[MicroTenant::class]->tenant;
-                        },
-                        Contracts\FileRepositoryInterface::class => FileRepository::class
-                    ]);
                 }
-            ], ['Database', 'Model']);
+            ]);
+        $this->registerEnvironment();
     }
 
-    public function boot(Kernel $kernel)
+    public function boot()
     {
         $this->registerDatabase()->registerModel();
         $this->overrideTenantConfig()
             ->overrideLaravelSupportConfig()
-            ->overrideModuleVersionConfig()
+            ->overrideMergePackageConfig()
             ->overrideAuthConfig();
-        $this->app->booted(function ($app) use ($kernel) {
-            Sanctum::usePersonalAccessTokenModel($this->PersonalAccessTokenModelInstance());
-        });
+        // Sanctum::usePersonalAccessTokenModel($this->PersonalAccessTokenModelInstance());
+        // $this->app->booted(function () {
+            // try {
+            //     config(['api-helper.expiration' => null]);
+            //     if (config('micro-tenant.monolith')){
+            //         if (isset($_SESSION['tenant'])){
+            //             FacadesMicroTenant::tenantImpersonate($_SESSION['tenant']);
+            //             $tenant = $_SESSION['tenant'];
+            //         }
+            //         if (isset($_SESSION['user'])) Auth::setUser($_SESSION['user']);
+            //     }else{
+            //         $microtenant = FacadesMicroTenant::getMicroTenant();
+            //         if (isset($microtenant)) $tenant = $microtenant->tenant->model;
+            //     }
+            //     if (isset($tenant)) {
+            //         tenancy()->end();
+            //         tenancy()->initialize($tenant);
+            //     }
+            // } catch (\Exception $e) {
+            //     abort(401);
+            // }
+        // });
 
-        if (request()->headers->has('AppCode')) {
-            FacadesApiAccess::init()->accessOnLogin(function ($api_access) use ($kernel) {
-                FacadesMicroTenant::onLogin($api_access);
-            });
-        } else {
-            //FOR TESTING ONLY             
-            if ((config('micro-tenant.dev_mode') && app()->environment('local')) || config('micro-tenant.superadmin')) {
-                $cache       = FacadesMicroTenant::getCacheData('impersonate');
-                $impersonate = cache()->tags($cache['tags'])->get($cache['name']);
-                if (isset($impersonate->tenant->model)) {
-                    FacadesMicroTenant::tenantImpersonate($impersonate->tenant->model);
-                }
-            } else {
-                $login_schema = config('micro-tenant.login_schema');
-                if (isset($login_schema) && \class_exists($login_schema)) {
-                    app($login_schema)->authenticate();
-                }
-            }
-        }
+        // try {
+            // && config('micro-tenant.direct_provider_access')
+            // if (request()->headers->has('appcode')) {
+            //     try {
+            //         FacadesMicroTenant::accessOnLogin();
+            //         // FacadesApiAccess::init()->accessOnLogin(function ($api_access) {
+            //         //     Auth::setUser($api_access->getUser());
+            //         // });
+            //     } catch (\Exception $e) {
+            //         dd($e->getMessage());
+            //     }
+            // } else {
+            //     if (config('micro-tenant.direct_provider_access')) {
+            //         $cache       = FacadesMicroTenant::getCacheData('impersonate');
+            //         $impersonate = cache()->tags($cache['tags'])->get($cache['name']);
+
+            //         $impersonate_model = $impersonate?->tenant ?? $impersonate?->group ?? $impersonate?->project;
+            //         if (isset($impersonate_model)) {
+            //             $model = $impersonate_model->model;
+            //             FacadesMicroTenant::tenantImpersonate($model);
+            //         }
+            //     } 
+            //     // else {
+            //     //     $login_schema = config('micro-tenant.login_schema');
+            //     //     if (isset($login_schema) && \class_exists($login_schema)) {
+            //     //         app($login_schema)->authenticate();
+            //     //     }
+            //     // }
+            // }
+        // } catch (\Exception $e) {
+        //     dd('e');
+        //     dd($e->getMessage());
+        // }
     }
 }

@@ -29,19 +29,14 @@ return new class extends Migration
         $table_name = $this->__table->getTableName();
         if (!$this->isTableExists()) {
             Schema::create($table_name, function (Blueprint $table) {
-                $appType = app(config('database.models.App', App::class));
-                $domain      = app(config('database.models.Domain', Domain::class));
+                $domain = app(config('database.models.Domain', Domain::class));
 
                 $table->id();
                 $table->string('uuid', 36)->nullable(false);
-                $table->string('name', 50)->unique()->nullable(false);
+                $table->string('name', 50)->nullable(false);
                 $table->string('reference_type', 50)->nullable();
                 $table->string('reference_id', 36)->nullable();
-                $table->enum('flag', [
-                    $this->__table::FLAG_APP_TENANT,
-                    $this->__table::FLAG_CENTRAL_TENANT,
-                    $this->__table::FLAG_TENANT
-                ])->default($this->__table::FLAG_TENANT)->nullable(false);
+                $table->string('flag',100)->default($this->__table::FLAG_TENANT)->nullable(false);
                 $table->foreignIdFor($domain::class)->nullable()->index()
                     ->constrained()->cascadeOnUpdate()->nullOnDelete();
                 $table->json('props')->nullable();
@@ -49,6 +44,7 @@ return new class extends Migration
                 $table->softDeletes();
 
                 $table->index(['reference_id', 'reference_type'], 'tenants_reference_index');
+                $table->unique(['name', 'flag'], 'tenant_unique');
             });
 
             Schema::table($table_name, function (Blueprint $table) use ($table_name) {

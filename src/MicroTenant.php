@@ -2,18 +2,27 @@
 
 namespace Hanafalah\MicroTenant;
 
-use Illuminate\Container\Container;
-use Illuminate\Support\Facades\Artisan;
-use Hanafalah\ApiHelper\ApiAccess;
+use Hanafalah\ApiHelper\Contracts\ModuleApiAccess;
+use Hanafalah\ApiHelper\Facades\ApiAccess;
 use Hanafalah\LaravelSupport\Supports\PackageManagement;
-use Hanafalah\MicroTenant\Contracts\Models\Tenant;
+use Hanafalah\MicroTenant\Concerns\Providers\HasImpersonate;
+use Hanafalah\MicroTenant\Concerns\Providers\HasOverrider;
+use Hanafalah\MicroTenant\Contracts\MicroTenant as ContractsMicroTenant;
+use Hanafalah\MicroTenant\Models\Tenant\Tenant;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\App;
+use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Str;
+use Hanafalah\LaravelSupport\Concerns\Support\HasRegisterConfig;
 
-class MicroTenant extends PackageManagement
+class MicroTenant extends PackageManagement implements ContractsMicroTenant
 {
-    /** @var array */
-    protected $__microtenant_config = [];
+    use HasOverrider, HasImpersonate, HasRegisterConfig;
+
+    protected array $__micro_tenant_config = [];
     protected string $__entity = 'Tenant';
+    protected $__exception;
 
     /** @var Tenant|int|string|null */
     public static $microtenant;
@@ -22,77 +31,56 @@ class MicroTenant extends PackageManagement
 
     public $tenant, $api_access;
 
-    protected $__impersonate;
     protected $__cache_data = [
         'impersonate' => [
             'name'    => 'microtenant-impersonate',
-            'tags'    => ['impersonate', 'microtenant-impersonate'],
+            'tags'    => ['impersonate','microtenant-impersonate'],
             'forever' => true
         ]
     ];
 
-    public static function getWithDatabaseName()
-    {
-        return static::$with_database_name;
-    }
-
-    public static function setWithDatabaseName(bool $status)
-    {
-        static::$with_database_name = $status;
-    }
-
-    /**
-     * Constructs a new instance of the MicroTenant class.
-     *
-     * @param Container $app The application container.
-     */
-    public function __construct()
-    {
-        $this->initConfig()->setConfig('micro-tenant', $this->__microtenant_config);
+    public function __construct(){
+        $this->initConfig()->setConfig('micro-tenant',$this->__micro_tenant_config);
         parent::__construct();
     }
 
+    public function getCacheData(? string $segment = null){
+        $cache_data = $this->__cache_data;
+        return $this->__impersonate = (isset($segment))
+            ? $cache_data[$segment]
+            : $cache_data;
+    }
 
-    public function addPackage(object $model, string $alias, ?string $namespace = null)
-    {
-        if (!isset($namespace)) {
-            $namespace = explode('/', $alias);
-            $namespace[0] = Str::studly($namespace[0]);
-            $namespace[1] = Str::studly($namespace[1]);
-            $namespace[2] = $namespace[1] . 'ServiceProvider';
-            $namespace = implode('\\', $namespace);
-        }
-        if (!isset($model->packages)) {
-            $model->packages = [];
-        }
-        $packages = $model->packages;
-        $namespace = addslashes($namespace);
-        $packages[$alias] = [
-            "provider" => $namespace
-        ];
-        $model->setAttribute('packages', $packages);
-        $model->save();
-
-        if (isset($model->path)) {
-            $base          = base_path($model->path);
-            $base_path     = $base . '/' . ($model->with_soruce ? 'src' : '');
-            $composer_path = $base_path . '/composer.json';
-            $composerData  = json_decode(file_get_contents($composer_path), true);
-            $requires      = $composerData['require'];
-            $exists        = $requires;
-            if (!isset($requires[$alias])) $exists[$alias] = '1.x';
-            $composerData['require'] = $exists;
-            file_put_contents($composer_path, json_encode($composerData, JSON_UNESCAPED_SLASHES));
-
-            //REMOVE COMPOSER LOCK
-            $lock_path = $base_path . '/composer.lock';
-            if (file_exists($lock_path)) {
-                unlink($lock_path);
+    public function impersonate(Model $tenant, ?bool $recurse = true): self{
+        try {
+            $path = $tenant->path.DIRECTORY_SEPARATOR.Str::kebab($tenant->name);
+            $this->basePathResolver($path);
+            if (file_exists($path.'/vendor/autoload.php')){
+                require_once $path.'/vendor/autoload.php';
             }
-            //DO COMPOSER INSTALL
-            // $process = new Process(['composer', 'install', '--no-interaction', '--no-progress', '--no-scripts'], $base);
-            // $process->run();
+            if ($recurse && isset($tenant->parent)){
+                $this->impersonate($tenant->parent);
+            }
+            $provider = $tenant->provider;
+            if (class_exists($provider)){
+                $provider = $this->replacement($provider);
+                app()->register($provider);
+                $config_name = Str::kebab(Str::before(class_basename($provider),'ServiceProvider'));
+                $own_models = config($config_name.'.database.models',[]);
+                $this->processRegisterProvider($config_name,$tenant?->packages ?? []);
+                $base_path = rtrim(config($config_name.'.paths.base_path'),DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
+                $this->processRegisterConfig($config_name, $base_path.config($config_name.'.libs.config'));
+                $models = config('database.models',[]);
+                $models = array_merge($models, $own_models);
+                config(['database.models' => $models]);
+            }
+            tenancy()->end();
+            tenancy()->initialize($tenant);
+            $this->overrideTenantConfig($tenant); 
+        } catch (\Throwable $th) {
+            throw $th;
         }
+        return $this;
     }
 
     /**
@@ -102,53 +90,56 @@ class MicroTenant extends PackageManagement
      *
      * @return self
      */
-    public function tenantImpersonate($tenant = null): self
-    {
+    public function tenantImpersonate($tenant = null): self{
         $tenant ??= $this->tenant;
-        $this->initialize($tenant);
+        if (isset($tenant) && !$tenant instanceof Model){
+            $tenant = $this->tenant = $this->TenantModel()->findOrFail($tenant);
+        }
         $this->getCacheData('impersonate');
-        $this->impersonate($tenant->path);
-        if (isset($this->__impersonate)) {
-            $this->setMicroTenant()
-                ->overrideDatabasePath();
-            $this->overrideStoragePath($tenant->name);
+        $this->initialize($tenant);
+        $tenant_folder = Str::kebab($tenant->name);
+        $path          = tenant_path($tenant_folder);
+        $this->basePathResolver($path);
+        $this->impersonate($tenant);
+        $database = config('micro-tenant.database');
+        $db_tenant_name = $database['database_tenant_name'];
+        foreach (config('database.clusters') as $key => $cluster) {                
+            // $this->setCache([
+            //     'name' => $cluster['search_path'].'_'.$tenant->getKey(),
+            //     'tags' => ['cluster','microtenant-cluster'],
+            //     'forever' => true
+            // ],function() use ($key,$cluster,$db_tenant_name){
+                if (config('database.connections.'.$key.'.driver') === null) continue;
+                $tenant_model = $this->TenantModel();
+                $connection_name = $tenant_model->getConnectionName();
+                if (config('database.connections.'.$connection_name.'.driver') !== null){
+                    config([
+                        'tenancy.database.prefix' => $cluster['search_path'],
+                        'tenancy.database.suffix' => null,
+                        'tenancy.database.central_connection' => $key
+                    ]);
+                    try {
+                        $manager = $this->TenantModel()->database()->manager();
+                        if (!$manager->databaseExists($this->TenantModel()->database()->getName())){
+                            $manager->createDatabase($this->TenantModel());
+                        }
+                    } catch (\Throwable $th) {
+                        throw $th;
+                    }
+                    config([
+                        'tenancy.database.prefix' => $db_tenant_name['prefix'],
+                        'tenancy.database.suffix' => $db_tenant_name['suffix'],
+                        'tenancy.database.central_connection' => 'central'
+                    ]);
+                }
+                // return true;
+            // });
         }
-
+        $tenant_config = config($tenant_folder.'.libs.migration');
+        $path = tenant_path($tenant_folder.'/src/'.$tenant_config);
+        $this->setMicroTenant($tenant)->overrideDatabasePath($path);
+        tenancy()->initialize($tenant);
         return $this;
-    }
-
-    public function overrideStoragePath(string $path): self
-    {
-        $path = tenant_path(\class_name_builder($path)) . '/storage';
-        app()->useStoragePath($path);
-        return $this;
-    }
-
-    /**
-     * Gets the current micro tenant.
-     *
-     * @return Tenant|int|string|null The current micro tenant.
-     */
-    public function getMicroTenant()
-    {
-        return static::$microtenant;
-    }
-
-    public function onLogin(ApiAccess $api_access)
-    {
-        $this->api_access = $api_access;
-        $current_reference = $this->api_access->getUser()->userReference;
-        if (isset($current_reference)) {
-            $this->tenant = $current_reference->tenant;
-            tenancy()->initialize($this->tenant);
-            if (isset($this->tenant)) {
-                $this->tenantImpersonate();
-            } else {
-                throw new \Exception('Tenant not found');
-            }
-        } else {
-            throw new \Exception('User Invalid');
-        }
     }
 
     /**
@@ -156,139 +147,113 @@ class MicroTenant extends PackageManagement
      *
      * @return self
      */
-    public function setMicroTenant(): self
-    {
+    public function setMicroTenant(?Model $tenant = null): self{
         $impersonate = $this->getCacheData('impersonate');
-        $tenant = $this->tenant;
-        $this->reconfigDatabase($tenant);
-        if (isset($tenant->parent)) {
-            $this->reconfigDatabase($tenant->parent);
-        }
-        $cache  = cache();
-        $cache  = $cache->tags($impersonate['tags']);
-        $cache  = $cache->get($impersonate['name'], null);
+        $tenant      ??= $this->tenant;
+        if (!isset($tenant->flag)) $tenant->refresh();
+        $cache = $this->getCache($impersonate['name'], $impersonate['tags']);
         if (isset($cache)) {
+            static::$microtenant = $cache;
+        }else{            
+            switch ($tenant->flag) {
+                case 'TENANT':
+                    $options = [
+                        '--tenant_id' => $tenant->getKey(),
+                        '--group_id'  => $tenant->parent_id,
+                        '--app_id'    => $tenant->parent->parent_id
+                    ];
+                break;
+                case 'CENTRAL_TENANT':
+                    $options = [
+                        '--group_id'  => $tenant->getKey(),
+                        '--app_id'    => $tenant->parent_id,
+                        '--skip' => true
+                    ];
+                break;
+                case 'APP':
+                    $options = [
+                        '--app_id'    => $tenant->getKey(),
+                        '--skip' => true
+                    ];
+                break;
+            }
+            if (isset($options)) Artisan::call('impersonate:cache',$options);
+            $cache = $this->getCache($impersonate['name'], $impersonate['tags']);
             static::$microtenant = $cache;
         }
         return $this;
     }
 
-    public function reconfigDatabase($tenant): self
-    {
-        $connection_path = "database.connections." . $tenant->getConnectionFlagName();
-        config([
-            "$connection_path.database" => $tenant->tenancy_db_name,
-            "$connection_path.username" => $tenant->tenancy_db_username,
-            "$connection_path.password" => $tenant->tenancy_db_password
-        ]);
-        return $this;
-    }
-
-    public function impersonate($path): self
-    {
-        $path          = base_path($path);
-        $loader        = require base_path() . '/vendor/autoload.php';
-        if (\file_exists($path . '/vendor/autoload.php')) {
-            $active_loader = require $path . '/vendor/autoload.php';
-
-            // $activeKeys    = $active_loader->getPrefixesPsr4();
-            // $psr4          = $this->diff($this->keys($activeKeys), $this->keys($loader->getPrefixesPsr4()));
-            // foreach ($psr4 as $psr) $loader->addPsr4($psr, $activeKeys[$psr]);
-            // $loader->register();
-            foreach (
-                [
-                    $this->tenant->app['provider'],
-                    $this->tenant->group['provider'],
-                    $this->tenant->provider
-                ] as $provider
-            ) {
-                app()->register($this->replacement($provider));
-            }
-            $cache = $this->getMicroTenantCache();
-            // if (!isset($cache)){
-            //     Artisan::call('impersonate:cache',[
-            //         '--tenant_id' => $this->tenant->getKey(),
-            //         '--group_id'  => $this->tenant->parent_id,
-            //         '--app_id'    => $this->api_access->getApiAccess()->reference_id
-            //     ]);
-            // }
-        }
-        return $this;
+    public function getMicroTenant(){
+        return static::$microtenant;
     }
 
     /**
+     * Sets the database migration path to the given path.
+     *
+     * @param string $migration_path The path to set as the database migration path.
+     *
+     * @return self
+     */
+    public function overrideDatabasePath(string $migration_path): self
+    {
+        App::useDatabasePath($migration_path);
+        return $this;
+    }
+
+    public function accessOnLogin(?string $token = null){
+        if (request()->headers->has('AppCode')) {
+            try {
+                ApiAccess::init($token ?? null)->accessOnLogin(function ($api_access) {
+                    $this->onLogin($api_access);
+                    Auth::setUser($api_access->getUser());
+                    app(config('laravel-support.service_cache'))->handle();
+                });
+            } catch (\Throwable $th) {
+                throw $th;
+            }
+        }
+    }
+
+    public function onLogin(ModuleApiAccess $api_access){
+        $this->api_access  = $api_access;
+        $current_reference = $this->api_access->getUser()->userReference;
+        $tenant            = $current_reference->tenant;
+        if (isset($current_reference) && isset($tenant)){
+            $this->tenant = $tenant;
+            (isset($this->tenant))
+                ? $this->tenantImpersonate($this->tenant)
+                : throw new \Exception('Tenant not found');
+        }else{
+            throw new \Exception('User Invalid');
+        }
+        return $this->getMicroTenant();
+    }
+
+    public function onLogout(?callable $callback){
+        static::$microtenant = null;
+        $impersonate = $this->getCacheData('impersonate');
+        $this->forgetTags($impersonate['tags']);
+        if (isset($callback)){
+            $callback();
+        }
+    }
+
+        /**
      * Replaces multiple backslashes with a single backslash in the given string.
      *
      * @param string $value The string to process.
      * @return string The processed string with reduced backslashes.
      */
-    private function replacement(string $value)
-    {
+    private function replacement(string $value){
         return preg_replace('/\\\\+/', '\\', $value);
     }
 
-    // public function providerFinder(string $path) : array {
-    //     $composerJsonPath = $path . '/composer.json';
-    //     if (file_exists($composerJsonPath)) {
-    //         $composerData = json_decode(file_get_contents($composerJsonPath), true);
-    //         return $composerData['extra']['laravel']['providers'] ?? [];
-    //     }
-
-    //     return [];
-    // }
-
-    public function getCacheData(?string $segment = null)
-    {
-        $cache_data = $this->__cache_data;
-        return $this->__impersonate = (isset($segment))
-            ? $cache_data[$segment]
-            : $cache_data;
+    public function setException($exception){
+        $this->__exception = $exception;
     }
 
-    public function overrideTenantConfig()
-    {
-        $microtenant   = $this->__microtenant_config;
-        $database      = $microtenant['database'];
-        $connection    = $database['connections'];
-        $model         = $database['models'] ?? [];
-        $dbname        = $database['database_tenant_name'];
-        config([
-            'tenancy'                                     => $this->__config['tenancy'],
-            'tenancy.filesystem.asset_helper_tenancy'     => false,
-            'tenancy.tenant_model'                        => $model['Tenant'] ?? null,
-            'tenancy.id_generator'                        => null,
-            'tenancy.domain_model'                        => $model['Domain'],
-            'tenancy.central_domains'                     => $microtenant['domains']['central_domains'],
-            'tenancy.database.central_connection'         => 'central',
-            'tenancy.database.template_tenant_connection' => null,
-            'tenancy.database.prefix'                     => $dbname['prefix'],
-            'tenancy.database.suffix'                     => $dbname['suffix'],
-            'tenancy.database.managers'                   => $database['managers'],
-            'database.connection_central_name'            => 'central',
-            'database.connection_central_tenant_name'     => 'central_tenant',
-            'database.connection_central_app_name'        => 'central_app',
-            'database.connections.central'                => $connection['central_connection'],
-            'database.connections.central_tenant'         => $connection['central_connection'],
-            'database.connections.central_app'            => $connection['central_connection']
-        ]);
-    }
-
-    public function forgetCache()
-    {
-        $this->forgetTags($this->__cache_data['impersonate']['tags']);
-    }
-
-    public function getMicroTenantCache(): mixed
-    {
-        $cache       = $this->getCacheData('impersonate');
-        return cache()->tags($cache['tags'])->get($cache['name']);
-    }
-
-    public function cacheTenantImperonate()
-    {
-        $impersonate = $this->getMicroTenantCache();
-        if (isset($impersonate->tenant->model)) {
-            $this->tenantImpersonate($impersonate->tenant->model);
-        }
+    public function getException(){
+        return $this->__exception;
     }
 }

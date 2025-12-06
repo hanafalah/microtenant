@@ -18,11 +18,15 @@ trait NowYouSeeMe
         });
     }
 
-    public function isNotTableExists(callable $callback)
+    public function isNotTableExists(callable $callback, ?callable $else_callback = null)
     {
-        $this->currentTenant(function ($schema, $table_name) use ($callback) {
+        $this->currentTenant(function ($schema, $table_name) use ($callback, $else_callback) {
             $is_exist = $schema->hasTable($table_name);
-            if (!$is_exist) $callback();
+            if (!$is_exist) {
+                $callback();
+            }elseif(isset($else_callback)){
+                $else_callback();
+            }
         });
     }
 
@@ -48,12 +52,34 @@ trait NowYouSeeMe
         $tenant_model = tenancy()->tenant;
         $tenant_id = tenancy()->tenant->getKey();
         if ($tenant_model->flag != Tenant::FLAG_TENANT) {
-            $current_tenant_id = MicroTenant::getMicroTenant()->tenant->model->id;
-            tenancy()->initialize($current_tenant_id);
+            $micro_tenant = MicroTenant::getMicroTenant();
+            $current_tenant_model = null;
+            switch ($this->__table->getConnectionName()) {
+                case 'tenant': 
+                    $is_impersonate = true;
+                    $current_tenant_model = $micro_tenant?->tenant->model ?? $micro_tenant?->group->model ?? $micro_tenant?->project->model ?? null;
+                break;
+                case 'central_tenant': 
+                    $is_impersonate = true;
+                    $current_tenant_model = $micro_tenant?->group->model ?? $micro_tenant?->project->model ?? null;
+                break;
+                case 'central_app': 
+                    $is_impersonate = true;
+                    $current_tenant_model = $micro_tenant->project->model;
+                break;
+                case 'central':
+                    $is_impersonate = false;
+                break;
+            }
+            if ($is_impersonate && isset($current_tenant_model)) {
+                // tenancy()->initialize($current_tenant_id);
+                // $tenant = tenancy()->tenant;
+                MicroTenant::tenantImpersonate($current_tenant_model,false);
+            }
         }
         $this->__table_name = $this->__table->getTable();
         $schema    = Schema::connection($this->__table->getConnectionName());
-        $callback($schema, explode('.', $this->__table_name)[1] ?? $this->__table_name);
+        $callback($schema, $this->__table_name);
         tenancy()->initialize($tenant_id);
     }
 }
